@@ -1,0 +1,81 @@
+%%writefile filter_1d_periodic.f90
+
+! ==============================================================================
+! PROGRAM UTAMA (MAIN)
+! ==============================================================================
+program main
+    use, intrinsic :: iso_fortran_env, only: dp => real64
+    use filter_mod
+    use potential_mod
+    implicit none
+
+    real(kind = dp)                 :: xmax, resolx, xi, lattice, q_bloch, barrier, well, v0, w0
+    real(kind = dp)                 :: norm_psi, t_start, t_end, mass
+    complex(kind = dp)              :: phase_pos, phase_neg, energy_result, guessE
+    integer                         :: nx, i
+    ! real(kind = dp), parameter    :: pi = acos(-1.0_dp)
+
+    logical                         :: use_compact
+
+    real(kind = dp), allocatable    :: x(:)
+    complex(kind = dp), allocatable :: psi(:), phi(:), vpot(:)
+
+    ! --- PENGATURAN PARAMETER SIMULASI ---
+    mass      = 1.0_dp
+    lattice   = 12.0_dp
+    xmax      = lattice / 2.0_dp
+    resolx    = 0.0012_dp
+    xi        = 0.0_dp
+    q_bloch   = 0.0_dp
+
+    use_compact = .true.
+
+    guessE    = cmplx(0.01_dp, 0.00_dp, kind = dp)
+
+    ! --- Menghitung jumlah titik grid ---
+    nx = nint((2.0_dp * xmax) / resolx)
+
+    ! Fasa batas periodik Bloch
+    phase_pos = exp(cmplx(0.0_dp,  q_bloch * lattice, kind = dp))
+    phase_neg = exp(cmplx(0.0_dp, -q_bloch * lattice, kind = dp))
+
+    ! --- ALOKASI MEMORI ---
+    allocate(x(nx), vpot(nx), psi(nx), phi(nx))
+
+    ! --- INISIALISASI GRID, POTENSIAL, DAN FUNGSI GELOMBANG AWAL ---
+    do i = 1, nx
+        x(i) = -xmax + real(i - 1, dp) * resolx
+
+        ! --- Tebakan awal paket gelombang periodik ---
+        psi(i) = cmplx(cos(2.0_dp * pi * x(i) / lattice), 0.0_dp, kind = dp)
+    end do
+
+    ! --- Normalisasi tebakan awal ---
+    norm_psi = real(sum(conjg(psi) * psi), kind = dp)
+    psi = psi / sqrt(norm_psi)
+
+    ! --- Persiapan potensial ---
+    v0 = 0.5_dp
+    barrier = 2.0_dp
+    well = 10.0_dp
+    call pot_kp(nx, x, barrier, well, v0, vpot)
+
+    ! --- JALANKAN METODE FILTER ---
+    call cpu_time(t_start)
+    call filterization(nx, psi, vpot, guessE, xi, resolx, mass, phase_pos, phase_neg, phi, energy_result, use_compact)
+    call cpu_time(t_end)
+
+    print '(A, ES12.4, A)', " Waktu Komputasi Filter: ", t_end - t_start, " detik"
+
+    ! --- SIMPAN HASIL (OUTPUT 1D) ---
+    open(unit = 10, file = 'wavefunction_1d.dat', status = 'replace', action = 'write')
+    write(10, '(A)') "# x(i)          Re(phi)         Im(phi)         Re(V)           Im(V)"
+    do i = 1, nx
+        write(10, '(5ES16.6)') x(i), real(phi(i)), aimag(phi(i)), real(vpot(i)), aimag(vpot(i))
+    end do
+    close(10)
+
+    ! --- DEALOKASI ---
+    deallocate(x, vpot, psi, phi)
+
+end program main

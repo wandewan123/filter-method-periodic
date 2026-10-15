@@ -1,0 +1,66 @@
+%%writefile potential_modul.f90
+
+module potential_mod
+    use, intrinsic :: iso_fortran_env, only: dp => real64
+    implicit none
+    real(kind=dp), parameter :: pi = acos(-1.0_dp)
+
+contains
+
+    ! ===========================
+    ! POTENSIAL COSINUS
+    ! ===========================
+    subroutine pot_cosine(nx, x, v0, a, vpot)
+        integer, intent(in)               :: nx
+        real(kind=dp), intent(in)         :: x(nx), a, v0
+        complex(kind = dp), intent(out)   :: vpot(nx) ! DIUBAH KE COMPLEX
+
+        integer :: i
+
+        do i = 1, nx
+            vpot(i) = cmplx(-v0 * cos(2.0_dp * pi * (x(i) / a)), 0.0_dp, kind = dp)
+        end do
+
+    end subroutine pot_cosine
+
+    ! ===========================
+    ! POTENSIAL KRONIG-PENNY
+    ! ===========================
+    subroutine pot_kp(nx, x, barrier, well, v0, vpot)
+        integer, intent(in)             :: nx
+        real(kind=dp), intent(in)       :: x(nx), barrier, well, v0
+        complex(kind = dp), intent(out) :: vpot(nx)
+
+        integer       :: i
+        real(kind=dp) :: end_barrier
+
+        end_barrier = x(1) + barrier
+
+        do i = 1, nx
+            if (x(i) <= end_barrier) then
+                vpot(i) = cmplx(v0, 0.0_dp, kind = dp)
+            else
+                vpot(i) = cmplx(0.0_dp, 0.0_dp, kind = dp)
+            end if
+        end do
+
+    end subroutine pot_kp
+
+    ! ===========================
+    ! POTENSIAL PT-SYMMETRY
+    ! ===========================
+    subroutine pot_PT(nx, x, v0, w0, a, vpot)
+        integer, intent(in)             :: nx
+        real(kind = dp), intent(in)     :: x(nx), v0, w0, a
+        complex(kind = dp), intent(out) :: vpot(nx)
+
+        integer :: i
+
+        do i = 1, nx
+            vpot(i) = cmplx(v0 * cos(2.0_dp * pi * (x(i) / a)), &
+                            w0 * sin(2.0_dp * pi * (x(i) / a)), kind = dp)
+        end do
+
+    end subroutine pot_PT
+
+end module potential_mod

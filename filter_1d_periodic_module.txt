@@ -1,0 +1,292 @@
+%%writefile filter_1d_periodic_module.f90
+
+! ==============================================================================
+! SIMULASI FILTERISASI KONDISI BATAS PERIODIK 1D (TEOREMA BLOCH)
+! Metode: Inverse Iteration + Finite Difference 1D + Sherman-Morrison Solver
+! ==============================================================================
+
+module filter_mod
+    use, intrinsic :: iso_fortran_env, only: dp => real64
+    implicit none
+
+contains
+
+    ! ==================================================================
+    ! SUBROUTINE TRIDAG (ALGORITMA THOMAS UNTUK MATRIKS KOMPLEKS)
+    ! Menyelesaikan Ty = r untuk matriks tridiagonal
+    ! ==================================================================
+    subroutine tridag(nx, a, b, c, r, u)
+        integer, intent(in)             :: nx
+        complex(kind = dp), intent(in)  :: a(nx), c(nx) ! Sub & Super-diagonal (gamma, alpha)
+        complex(kind = dp), intent(in)  :: b(nx)        ! Diagonal term (beta_mod)
+        complex(kind = dp), intent(in)  :: r(nx)        ! Vektor RHS
+        complex(kind = dp), intent(out) :: u(nx)        ! Vektor Solusi
+
+        complex(kind = dp), allocatable :: gam(:)
+        complex(kind = dp)              :: bet
+        integer                         :: j
+
+        allocate(gam(nx))
+
+        ! --- Forward Sweep ---
+        bet = b(1)
+        if (abs(bet) == 0.0_dp) print *, "[ERROR] TRIDAG: Pembagian dengan nol di indeks 1"
+        u(1) = r(1) / bet
+
+        do j = 2, nx
+            gam(j) = c(j - 1) / bet
+            bet = b(j) - a(j) * gam(j)
+            if (abs(bet) == 0.0_dp) print *, "[ERROR] TRIDAG: Pembagian dengan nol di indeks ", j
+            u(j) = (r(j) - a(j) * u(j - 1)) / bet
+        end do
+
+        ! --- Back Substitution ---
+        do j = nx - 1, 1, -1
+            u(j) = u(j) - gam(j + 1) * u(j + 1)
+        end do
+
+        deallocate(gam)
+    end subroutine tridag
+
+    ! ==================================================================
+    ! SUBROUTINE SHERMAN-MORRISON SOLVER
+    ! Menyelesaikan (T + uvT)x = r
+    ! ==================================================================
+    subroutine shermo(nx, r, alpha, beta, gamma, phase_pos, phase_neg, x_result)
+        integer, intent(in)             :: nx
+        complex(kind = dp), intent(in)  :: alpha(nx), gamma(nx)
+        complex(kind = dp), intent(in)  :: beta(nx), r(nx), phase_pos, phase_neg
+        complex(kind = dp), intent(out) :: x_result(nx)
+
+        complex(kind = dp), allocatable :: beta_mod(:), u(:), y(:), z(:)
+        complex(kind = dp)              :: v_dot_y, v_dot_z
+
+        allocate(beta_mod(nx), u(nx), y(nx), z(nx))
+
+        ! --- Inisialisasi vektor u dan diagonal term yang dimodifikasi ---
+        u = cmplx(0.0_dp, 0.0_dp, kind = dp)
+        beta_mod = beta
+
+        ! --- Elemen pojok akibat syarat batas Bloch ---
+        u(1)  = gamma(1) * phase_neg
+        u(nx) = alpha(nx) * phase_pos
+
+        ! --- Modifikasi elemen diagonal T untuk Sherman-Morrison ---
+        beta_mod(1)  = beta_mod(1) - u(1)
+        beta_mod(nx) = beta_mod(nx) - u(nx)
+
+        ! --- Selesaikan dua sistem persamaan linear tridiagonal ---
+        call tridag(nx, gamma, beta_mod, alpha, r, y)
+        call tridag(nx, gamma, beta_mod, alpha, u, z)
+
+        ! --- Vektor v^T adalah [1, 0, ..., 0, 1], maka dot product-nya cukup y(1)+y(nx) ---
+        v_dot_y = y(1) + y(nx)
+        v_dot_z = z(1) + z(nx)
+
+        ! --- Solusi akhir Sherman-Morrison ---
+        x_result = y - (z * (v_dot_y / (1.0_dp + v_dot_z)))
+
+        deallocate(beta_mod, u, y, z)
+
+    end subroutine shermo
+
+    ! ==================================================================
+    ! SUBROUTINE MATVEC (MATRIX-VECTOR MULTIPLICATION)
+    ! ==================================================================
+    subroutine matvec(nx, alpha, beta, gamma, phase_pos, phase_neg, x, Ax)
+        integer, intent(in)             :: nx
+        complex(kind = dp), intent(in)  :: alpha(nx), gamma(nx)
+        complex(kind = dp), intent(in)  :: phase_pos, phase_neg, x(nx), beta(nx)
+        complex(kind = dp), intent(out) :: Ax(nx)
+        integer                         :: i
+
+        do i = 2, nx - 1
+            Ax(i) = (beta(i) * x(i)) + (alpha(i) * x(i + 1)) + (gamma(i) * x(i - 1))
+        end do
+
+        ! Kondisi batas (periodic)
+        Ax(1)  = (beta(1) * x(1)) + (alpha(1) * x(2)) + (gamma(1) * x(nx) * phase_neg)
+        Ax(nx) = (beta(nx) * x(nx)) + (alpha(nx) * x(1) * phase_pos) + (gamma(nx) * x(nx - 1))
+    end subroutine matvec
+
+    ! ==================================================================
+    ! SUBROUTINE MENGHITUNG EKSPEKTASI ENERGI
+    ! ==================================================================
+    subroutine energy_eigen(nx, phi, beta_mat, alpha, gamma, phase_pos, phase_neg, resolx, energy_result)
+        integer, intent(in)             :: nx
+        real(kind = dp), intent(in)     :: resolx
+        complex(kind = dp), intent(in)  :: phi(nx), beta_mat(nx), phase_pos, phase_neg
+        complex(kind = dp), intent(in)  :: alpha(nx), gamma(nx)
+        complex(kind = dp), intent(out) :: energy_result
+
+        complex(kind = dp), allocatable :: Hphi(:)
+
+        ! --- Menghitung operator Hx ---
+        allocate(Hphi(nx))
+        call matvec(nx, alpha, beta_mat, gamma, phase_pos, phase_neg, phi, Hphi)
+
+        ! --- Menghitung energi
+        energy_result = sum(conjg(phi) * Hphi)
+
+        deallocate(Hphi)
+    end subroutine energy_eigen
+
+    ! ==================================================================
+    ! SUBROUTINE ITERASI FILTER UTAMA
+    ! ==================================================================
+    subroutine filterization(nx, psi, vpot, guessE, xi, resolx, mass, phase_pos, phase_neg, phi, energy_result, use_compact)
+        integer, intent(in)               :: nx
+        real(kind = dp), intent(in)       :: xi, resolx, mass
+        complex(kind = dp), intent(in)    :: vpot(nx)
+        complex(kind = dp), intent(in)    :: phase_pos, phase_neg, guessE
+        complex(kind = dp), intent(inout) :: psi(nx)
+        complex(kind = dp), intent(out)   :: phi(nx)
+        complex(kind = dp), intent(out)   :: energy_result
+
+        complex(kind = dp), allocatable   :: Hphi(:), BETA(:), beta_energy(:), alpha(:), gamma(:), rhs(:)
+        complex(kind = dp)                :: energy, psi_prev, psi_next, v_prev, v_next, phi_prev, phi_next
+        real(kind = dp)                   :: error_res, error_current
+        real(kind = dp)                   :: res_error, phi2
+        real(kind = dp)                   :: eps_mach, tol_stagnation, h2
+        integer                           :: i, counter
+
+        logical, intent(in), optional :: use_compact
+        logical                       :: active_compact
+        if (present(use_compact)) then
+            active_compact = use_compact
+        else
+            active_compact = .false.
+        end if
+
+        h2 = resolx ** 2
+        allocate(BETA(nx), beta_energy(nx), Hphi(nx), alpha(nx), gamma(nx), rhs(nx))
+
+        energy    = guessE
+        error_res = 10.0_dp
+        counter   = 0
+
+        eps_mach       = epsilon(1.0_dp)
+        tol_stagnation = 100.0_dp * eps_mach
+
+        print *, " >>> [MEMULAI PROSES FILTERISASI 1D] <<< "
+        if (active_compact) then
+            print *, " >>> MODE: High-Order Compact O(h^4) AKTIF <<<"
+        else
+            print *, " >>> MODE: Standar O(h^2) AKTIF <<<"
+        end if
+        print '(A, I0, A)', "  >>> GRID = ", nx, " TITIK <<<"
+        print *, " "
+
+        do while (.true.)
+            counter = counter + 1
+
+            if (active_compact) then
+                do i = 1, nx
+                    if (i == 1) then
+                        v_prev = vpot(nx)
+                        psi_prev = phase_neg * psi(nx)
+                    else
+                        v_prev = vpot(i - 1)
+                        psi_prev = psi(i - 1)
+                    end if
+                    if (i == nx) then
+                        v_next = vpot(1)
+                        psi_next = phase_pos * psi(1)
+                    else
+                        v_next = vpot(i + 1)
+                        psi_next = psi(i + 1)
+                    end if
+                    rhs(i)   = (psi_prev + (10.0_dp * psi(i)) + psi_next) / 12.0_dp
+                    gamma(i) = (-0.5_dp / (h2 * mass)) - (energy / 12.0_dp) + (v_prev / 12.0_dp)
+                    alpha(i) = (-0.5_dp / (h2 * mass)) - (energy / 12.0_dp) + (v_next / 12.0_dp)
+                    BETA(i)  = (1.0_dp / (h2 * mass)) - ((10.0_dp * energy) / 12.0_dp) + (10.0_dp * vpot(i) / 12.0_dp)
+                end do
+            else
+                rhs = psi
+                do i = 1, nx
+                    gamma(i) = cmplx(-0.5_dp / (h2 * mass), 0.0_dp, kind=dp)
+                    alpha(i) = cmplx(-0.5_dp / (h2 * mass), 0.0_dp, kind=dp)
+                    BETA(i)  = (1.0_dp / (h2 * mass)) + vpot(i) - energy
+                    beta_energy(i) = (1.0_dp / (h2 * mass)) + vpot(i)
+                end do
+            end if
+
+            ! --- Mencari fungsi gelombang ---
+            call shermo(nx, rhs, alpha, BETA, gamma, phase_pos, phase_neg, phi)
+
+            ! --- Normalisasi L2-Norm ---
+            phi2 = real(sum(conjg(phi) * phi), kind = dp)
+            if (phi2 > tiny(1.0_dp)) then
+                phi = phi / sqrt(phi2)
+            else
+                print *, "[WARNING] Pembagian nol saat normalisasi!"
+                exit
+            end if
+
+            ! --- Hitung Ekspektasi Energi ---
+            if (active_compact) then
+                do i = 1, nx
+                    if (i == 1) then
+                        v_prev = vpot(nx)
+                        phi_prev = phase_neg * phi(nx)
+                    else
+                        v_prev = vpot(i - 1)
+                        phi_prev = phi(i - 1)
+                    end if
+                    if (i == nx) then
+                        v_next = vpot(1)
+                        phi_next = phase_pos * phi(1)
+                    else
+                        v_next = vpot(i + 1)
+                        phi_next = phi(i + 1)
+                    end if
+                    rhs(i)   = (phi_prev + (10.0_dp * phi(i)) + phi_next) / 12.0_dp
+                    gamma(i) = (-0.5_dp / (h2 * mass)) + (v_prev / 12.0_dp)
+                    alpha(i) = (-0.5_dp / (h2 * mass)) + (v_next / 12.0_dp)
+                    BETA(i)  = (1.0_dp / (h2 * mass))  + (10.0_dp * vpot(i) / 12.0_dp)
+                end do
+                call matvec(nx, alpha, BETA, gamma, phase_pos, phase_neg, phi, Hphi)
+                energy_result = sum(conjg(phi) * Hphi) / sum(conjg(phi) * rhs)
+            else
+                call energy_eigen(nx, phi, beta_energy, alpha, gamma, phase_pos, phase_neg, resolx, energy_result)
+            end if
+
+            ! --- Cek Nilai Residual Error ---
+            if (active_compact) then
+                res_error = real(sum(conjg(Hphi - energy_result * rhs) * (Hphi - energy_result * rhs)), kind = dp)
+            else
+                call matvec(nx, alpha, beta_energy, gamma, phase_pos, phase_neg, phi, Hphi)
+                res_error     = real(sum(conjg(Hphi - energy_result * phi) * (Hphi - energy_result * phi)), kind = dp)
+            end if
+            error_current = sqrt(res_error) / max(abs(energy_result), tiny(1.0_dp))
+
+            print '(A, I3, A, F10.6, A, F10.6, A, ES12.5)', "Iterasi: ", counter, &
+                " | Re(E): ", real(energy_result), " | Im(E): ", aimag(energy_result), " | Error: ", error_current
+
+            ! 6. Kriteria Berhenti (Stopping Criteria)
+            if (error_current <= tol_stagnation) then
+                print *, " "
+                print *, ">>> [SUCCESS] Mencapai batas presisi mesin! <<<"
+                exit
+            else if (abs(error_res - error_current) / error_res < eps_mach) then
+                print *, " "
+                print *, ">>> [INFO] Konvergensi stagnan di limit numerik <<<"
+                exit
+            else if (error_current > error_res .and. counter > 5) then
+                print *, " "
+                print *, ">>> [WARNING] Indikasi osilasi numerik <<<"
+                exit
+            end if
+
+            ! 7. Update Parameter untuk Iterasi Selanjutnya
+            energy    = ((1.0_dp - xi) * energy_result) + (xi * energy)
+            psi       = phi
+            error_res = error_current
+        end do
+
+        print *, " "
+
+        deallocate(BETA, beta_energy, Hphi, alpha, gamma, rhs)
+    end subroutine filterization
+
+end module filter_mod
